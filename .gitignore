@@ -1,0 +1,7 @@
+/target/
+*.pdf
+/typst-smoke.typ
+/typst-wbs-smoke.typ
+/typst-package-smoke.typ
+/typst-smoke.pdf
+/typst-wbs-smoke.pdf

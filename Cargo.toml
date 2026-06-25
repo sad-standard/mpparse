@@ -1,0 +1,31 @@
+[package]
+name = "mpp-rs"
+version = "0.1.0"
+edition = "2021"
+description = "A partial MPXJ-derived Microsoft Project .mpp reader for Typst and WebAssembly."
+license = "LGPL-2.1-only"                                                                       # derivative of MPXJ (LGPL-2.1) — see README
+repository = "https://github.com/sad-standard/mpparse"
+
+[lib]
+# rlib  -> native builds + `cargo test`
+# cdylib -> the wasm32 artifact loaded by Typst's `plugin()`
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cfb = "0.10" # OLE2 / Compound File Binary reader (the .mpp container)
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "alloc",
+] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+# The Typst plugin ABI shim is only needed for the wasm32 target. Keeping it
+# target-gated means `cargo test` on the host stays clean.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-minimal-protocol = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
