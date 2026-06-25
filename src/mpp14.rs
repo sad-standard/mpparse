@@ -16,7 +16,7 @@ use std::io::{Cursor, Read};
 use chrono::{Duration, NaiveDateTime};
 
 use crate::fixed::{FixedData, FixedMeta};
-use crate::model::{Project, Task};
+use crate::model::{Project, Resource, Task};
 use crate::util::{get_f64, get_i32, get_timestamp, get_u16, get_u32, to_iso};
 use crate::var::{Var2Data, VarMeta};
 
@@ -47,6 +47,15 @@ const FIX1_START_ALT: usize = 46; // observed fallback start in newer/remapped M
 const FIX1_START: usize = 50; //    block 1 (Fixed2Data)
 const FIX1_FINISH: usize = 54; //   block 1 (Fixed2Data)
 const VAR_NAME_KEY: i32 = 14; //    Var2Data key
+
+const RESOURCE_FIXEDMETA_ITEM_SIZE: usize = 37;
+const RESOURCE_UNIQUE_ID_OFFSET: usize = 0;
+const RESOURCE_ID_OFFSET: usize = 4;
+const RESOURCE_NAME_KEY: i32 = 1;
+
+const ASSIGNMENT_ITEM_SIZE: usize = 110;
+const ASSIGNMENT_TASK_UNIQUE_ID_OFFSET: usize = 4;
+const ASSIGNMENT_RESOURCE_UNIQUE_ID_OFFSET: usize = 8;
 
 const PROPS_KEY_TASK_FIELD_MAP: i32 = 131_092;
 const PROPS_KEY_TASK_FIELD_MAP2: i32 = 50_331_668;
@@ -412,6 +421,90 @@ fn f64_from_field(item: Option<FieldItem>, d0: Option<&[u8]>, d2: Option<&[u8]>,
     }
 }
 
+fn fixed_size_items(data: &[u8], item_size: usize) -> impl Iterator<Item = &[u8]> {
+    data.chunks_exact(item_size)
+}
+
+fn parse_resources<F: Read + std::io::Seek>(cf: &mut cfb::CompoundFile<F>) -> Vec<Resource> {
+    let base = format!("/{PROJECT_DIR_14}/TBkndRsc");
+    let Ok(var_meta_bytes) = read_stream(cf, &format!("{base}/VarMeta")) else {
+        return Vec::new();
+    };
+    let Ok(var_meta) = VarMeta::parse(&var_meta_bytes) else {
+        return Vec::new();
+    };
+    let Some(var_data_bytes) = read_stream_optional(cf, &format!("{base}/Var2Data")) else {
+        return Vec::new();
+    };
+    let var_data = Var2Data::parse(&var_meta, &var_data_bytes);
+    let Ok(fixed_meta) = read_stream(cf, &format!("{base}/FixedMeta"))
+        .and_then(|bytes| FixedMeta::parse(&bytes, RESOURCE_FIXEDMETA_ITEM_SIZE)) else {
+        return Vec::new();
+    };
+    let Some(fixed_data_bytes) = read_stream_optional(cf, &format!("{base}/FixedData")) else {
+        return Vec::new();
+    };
+    let fixed_data = FixedData::parse(&fixed_meta, &fixed_data_bytes);
+
+    let mut resources = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for index in 0..fixed_data.item_count() {
+        let Some(data) = fixed_data.item(index) else {
+            continue;
+        };
+        let Some(unique_id) = get_i32(data, RESOURCE_UNIQUE_ID_OFFSET) else {
+            continue;
+        };
+        if unique_id <= 0 || !seen.insert(unique_id) {
+            continue;
+        }
+        let name = var_data
+            .get_unicode_string(&var_meta, unique_id, RESOURCE_NAME_KEY)
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        resources.push(Resource {
+            unique_id,
+            id: get_i32(data, RESOURCE_ID_OFFSET).unwrap_or(-1),
+            name,
+        });
+    }
+    resources.sort_by_key(|resource| resource.id);
+    resources
+}
+
+fn parse_task_resource_names<F: Read + std::io::Seek>(
+    cf: &mut cfb::CompoundFile<F>,
+    resources: &[Resource],
+) -> std::collections::BTreeMap<i32, Vec<String>> {
+    let Some(data) = read_stream_optional(cf, &format!("/{PROJECT_DIR_14}/TBkndAssn/FixedData")) else {
+        return std::collections::BTreeMap::new();
+    };
+    let resource_names: std::collections::BTreeMap<i32, &str> = resources
+        .iter()
+        .map(|resource| (resource.unique_id, resource.name.as_str()))
+        .collect();
+    let mut result: std::collections::BTreeMap<i32, Vec<String>> = std::collections::BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in fixed_size_items(&data, ASSIGNMENT_ITEM_SIZE) {
+        let Some(task_unique_id) = get_i32(item, ASSIGNMENT_TASK_UNIQUE_ID_OFFSET) else {
+            continue;
+        };
+        let Some(resource_unique_id) = get_i32(item, ASSIGNMENT_RESOURCE_UNIQUE_ID_OFFSET) else {
+            continue;
+        };
+        if task_unique_id <= 0 || resource_unique_id <= 0 || !seen.insert((task_unique_id, resource_unique_id)) {
+            continue;
+        }
+        let Some(name) = resource_names.get(&resource_unique_id) else {
+            continue;
+        };
+        result.entry(task_unique_id).or_default().push((*name).to_string());
+    }
+    result
+}
+
 pub fn parse(bytes: &[u8]) -> Result<Project, String> {
     let mut cf = cfb::CompoundFile::open(Cursor::new(bytes.to_vec()))
         .map_err(|e| format!("not a valid OLE/MPP container: {e}"))?;
@@ -437,6 +530,8 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
     let project_props = read_stream_optional(&mut cf, &format!("/{PROJECT_DIR_14}/Props"))
         .or_else(|| read_stream_optional(&mut cf, "/Props14"));
     let field_map = parse_task_field_map(project_props.as_deref());
+    let resources = parse_resources(&mut cf);
+    let task_resource_names = parse_task_resource_names(&mut cf, &resources);
 
     // Fixed2 is optional on some files; tolerate its absence (Start/Finish None).
     let fixed2 = (|| -> Result<FixedData, String> {
@@ -559,12 +654,13 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
                 .or_else(|| cost_at(Some(d0), FIX0_COST)),
             fixed_cost: f64_from_field(field_map.get(TASK_FIELD_FIXED_COST), Some(d0), d2, cost_at)
                 .or_else(|| cost_at(Some(d0), FIX0_FIXED_COST)),
+            resource_names: task_resource_names.get(&unique_id).cloned().unwrap_or_default(),
         };
         tasks.push(task);
     }
 
     tasks.sort_by_key(|t| t.id);
-    Ok(Project { format, tasks })
+    Ok(Project { format, resources, tasks })
 }
 
 #[cfg(test)]

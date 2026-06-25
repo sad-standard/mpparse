@@ -6,7 +6,16 @@ use serde::Serialize;
 #[derive(Serialize, Default)]
 pub struct Project {
     pub format: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<Resource>,
     pub tasks: Vec<Task>,
+}
+
+#[derive(Serialize, Default)]
+pub struct Resource {
+    pub unique_id: i32,
+    pub id: i32,
+    pub name: String,
 }
 
 #[derive(Serialize, Default)]
@@ -54,5 +63,7 @@ pub struct Task {
     pub cost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resource_names: Vec<String>,
     pub percent_complete: u16,
 }

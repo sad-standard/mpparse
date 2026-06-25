@@ -67,10 +67,22 @@ fn synthetic_mpp14_one_task() {
     d2[54..56].copy_from_slice(&0u16.to_le_bytes()); // finish time
     d2[56..58].copy_from_slice(&370u16.to_le_bytes()); // finish days
 
+    // ---- resource + assignment data: one named resource assigned to the task ----
+    let mut r0 = vec![0u8; 16];
+    r0[0..4].copy_from_slice(&501i32.to_le_bytes()); // resource unique id
+    r0[4..8].copy_from_slice(&1i32.to_le_bytes()); // resource id
+
+    let mut assn0 = vec![0u8; 110];
+    assn0[0..4].copy_from_slice(&9001i32.to_le_bytes()); // assignment unique id
+    assn0[4..8].copy_from_slice(&110i32.to_le_bytes()); // task unique id
+    assn0[8..12].copy_from_slice(&501i32.to_le_bytes()); // resource unique id
+
     // ---- author the OLE container ----
     let mut cf = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
     cf.create_storage("/   114").unwrap();
     cf.create_storage("/   114/TBkndTask").unwrap();
+    cf.create_storage("/   114/TBkndRsc").unwrap();
+    cf.create_storage("/   114/TBkndAssn").unwrap();
 
     let write = |cf: &mut cfb::CompoundFile<Cursor<Vec<u8>>>, path: &str, bytes: &[u8]| {
         let mut s = cf.create_stream(path).unwrap();
@@ -84,6 +96,11 @@ fn synthetic_mpp14_one_task() {
     write(&mut cf, "/   114/TBkndTask/FixedData", &d0);
     write(&mut cf, "/   114/TBkndTask/Fixed2Meta", &fixed_meta(92, 0));
     write(&mut cf, "/   114/TBkndTask/Fixed2Data", &d2);
+    write(&mut cf, "/   114/TBkndRsc/VarMeta", &var_meta(501, 1, 0));
+    write(&mut cf, "/   114/TBkndRsc/Var2Data", &var2data_string("Resource One"));
+    write(&mut cf, "/   114/TBkndRsc/FixedMeta", &fixed_meta(37, 0));
+    write(&mut cf, "/   114/TBkndRsc/FixedData", &r0);
+    write(&mut cf, "/   114/TBkndAssn/FixedData", &assn0);
 
     cf.flush().unwrap();
     let bytes = cf.into_inner().into_inner();
@@ -93,6 +110,10 @@ fn synthetic_mpp14_one_task() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert_eq!(v.get("format").unwrap(), "MSProject.MPP14");
+    let resources = v.get("resources").unwrap().as_array().unwrap();
+    assert_eq!(resources[0].get("unique_id").unwrap(), 501);
+    assert_eq!(resources[0].get("id").unwrap(), 1);
+    assert_eq!(resources[0].get("name").unwrap(), "Resource One");
     let tasks = v.get("tasks").unwrap().as_array().unwrap();
     let task = &tasks[0];
     assert_eq!(task.get("unique_id").unwrap(), 110);
@@ -106,4 +127,5 @@ fn synthetic_mpp14_one_task() {
     assert_eq!(task.get("work_hours").unwrap(), 60.0);
     assert_eq!(task.get("cost").unwrap(), 123.45);
     assert_eq!(task.get("fixed_cost").unwrap(), 5.0);
+    assert_eq!(task.get("resource_names").unwrap().as_array().unwrap()[0], "Resource One");
 }

@@ -13,8 +13,10 @@ and Gantt-style documents.
 Per task: `unique_id`, `id`, `name`, `outline_level`, optional `parent_unique_id`,
 `start`, `finish`, additional decoded date fields (`scheduled_*`, `actual_*`,
 `early_*`, `late_*`, `deadline`, `constraint_date`, `created`, `baseline_*`),
-selected numeric fields (`work_hours`, `cost`, `fixed_cost`), and
-`percent_complete`.
+selected numeric fields (`work_hours`, `cost`, `fixed_cost`), assigned
+`resource_names` when assignment/resource streams are present, and
+`percent_complete`. Top-level `resources` are also emitted when resource names
+are available.
 
 ```json
 {
@@ -72,7 +74,7 @@ let json = mpp_rs::parse_to_json(&mpp_bytes)?;
 util.rs    little-endian decoders, MS Project epoch (1983-12-31), UTF-16LE
 var.rs     VarMeta12  + Var2Data   (variable-length fields, e.g. Name)
 fixed.rs   FixedMeta  + FixedData  (fixed blocks; block 0 + Fixed2Data block 1)
-mpp14.rs   OLE navigation (/   114/TBkndTask/*) + task assembly
+mpp14.rs   OLE navigation (/   114/TBkndTask/*, TBkndRsc/*, TBkndAssn/*) + task assembly
 model.rs   serde structs
 lib.rs     parse_to_json() + the wasm32 parse_mpp shim
 ```
@@ -92,6 +94,9 @@ and variable block formats are ported from MPXJ.
   Finish, scheduled/actual/early/late/deadline/constraint/created/baseline dates,
   parent task unique ID, work, cost, and fixed cost. Date values are still
   filtered against the project date window before they are emitted.
+- Resource names are read from `TBkndRsc` and conservatively attached to tasks
+  through fixed-size `TBkndAssn/FixedData` task/resource unique-ID links when
+  both sides are present.
 
 ## Build and test
 
