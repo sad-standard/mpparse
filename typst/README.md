@@ -41,11 +41,11 @@ Read Microsoft Project `.mpp` task data from Typst via a WebAssembly plugin.
 ## Status
 
 This is an MVP reader for MPP14 files (Project 2010 and later). It extracts task
-IDs, names, outline levels, start/finish dates, scheduled/actual/early/late date
-fields when they can be decoded confidently, deadlines, constraint dates, created
-dates, and percent complete. It includes limited fallbacks for newer/remapped
-MPP14 task fields, but does not yet implement the full MPXJ reader or complete
-in-file field-map remapping.
+IDs, names, outline levels, optional parent task unique IDs, start/finish dates,
+scheduled/actual/early/late date fields when they can be decoded confidently,
+deadlines, constraint dates, created dates, baseline dates, selected work/cost
+fields, and percent complete. It includes limited fallbacks for newer/remapped
+MPP14 task fields, but does not yet implement the full MPXJ reader.
 
 ## License
 

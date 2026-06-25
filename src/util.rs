@@ -36,6 +36,13 @@ pub fn get_i32(data: &[u8], offset: usize) -> Option<i32> {
     get_u32(data, offset).map(|v| v as i32)
 }
 
+#[inline]
+pub fn get_f64(data: &[u8], offset: usize) -> Option<f64> {
+    let b = data.get(offset..offset + 8)?;
+    let value = f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+    Some(if value.is_nan() { 0.0 } else { value })
+}
+
 /// `MPPUtility.getTimestamp(data, offset)`.
 ///
 /// Layout at `offset`: `[time: u16][days: u16]`. `time` is in units of six

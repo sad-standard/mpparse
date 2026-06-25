@@ -49,12 +49,16 @@ fn var2data_string(s: &str) -> Vec<u8> {
 
 #[test]
 fn synthetic_mpp14_one_task() {
-    // ---- fixed block 0: UID@0, ID@4, OutlineLevel@40, %@90 ----
-    let mut d0 = vec![0u8; 100];
+    // ---- fixed block 0: UID@0, ID@4, parent UID@36, OutlineLevel@40, %@90, work/cost ----
+    let mut d0 = vec![0u8; 166];
     d0[0..4].copy_from_slice(&1i32.to_le_bytes()); // id
     d0[4..8].copy_from_slice(&110i32.to_le_bytes()); // unique id
+    d0[36..40].copy_from_slice(&99i32.to_le_bytes()); // parent unique id
     d0[40..42].copy_from_slice(&1u16.to_le_bytes()); // outline level
     d0[90..92].copy_from_slice(&50u16.to_le_bytes()); // % complete
+    d0[126..134].copy_from_slice(&3_600_000f64.to_le_bytes()); // 60 hours in MPXJ work units
+    d0[150..158].copy_from_slice(&12_345f64.to_le_bytes()); // currency is stored as cents
+    d0[158..166].copy_from_slice(&500f64.to_le_bytes()); // fixed cost cents
 
     // ---- fixed block 1: Start@50, Finish@54 (MPP timestamp: time, days) ----
     let mut d2 = vec![0u8; 64];
@@ -95,7 +99,11 @@ fn synthetic_mpp14_one_task() {
     assert_eq!(task.get("id").unwrap(), 1);
     assert_eq!(task.get("name").unwrap(), "Test Task");
     assert_eq!(task.get("outline_level").unwrap(), 1);
+    assert_eq!(task.get("parent_unique_id").unwrap(), 99);
     assert_eq!(task.get("percent_complete").unwrap(), 50);
     assert_eq!(task.get("start").unwrap(), "1984-12-31T00:48:00");
     assert!(task.get("finish").unwrap().is_string());
+    assert_eq!(task.get("work_hours").unwrap(), 60.0);
+    assert_eq!(task.get("cost").unwrap(), 123.45);
+    assert_eq!(task.get("fixed_cost").unwrap(), 5.0);
 }

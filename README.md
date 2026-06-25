@@ -10,9 +10,11 @@ and Gantt-style documents.
 
 ## What it reads
 
-Per task: `unique_id`, `id`, `name`, `outline_level`, `start`, `finish`,
-additional decoded date fields (`scheduled_*`, `actual_*`, `early_*`, `late_*`,
-`deadline`, `constraint_date`, `created`), and `percent_complete`.
+Per task: `unique_id`, `id`, `name`, `outline_level`, optional `parent_unique_id`,
+`start`, `finish`, additional decoded date fields (`scheduled_*`, `actual_*`,
+`early_*`, `late_*`, `deadline`, `constraint_date`, `created`, `baseline_*`),
+selected numeric fields (`work_hours`, `cost`, `fixed_cost`), and
+`percent_complete`.
 
 ```json
 {
@@ -86,9 +88,10 @@ and variable block formats are ported from MPXJ.
   `FieldMap14` defaults. The reader also includes fallbacks for newer or
   remapped MPP14 files where task ID/unique ID, outline level, or task start
   moved.
-- MPP14 root `Props14` task field-map parsing is partially ported for fixed-data
-  Start/Finish and Scheduled Start/Finish remapping. Other field-map locations
-  (metadata and variable data) remain outside the current scope.
+- MPP14 root `Props14` task field-map parsing is partially ported for Start,
+  Finish, scheduled/actual/early/late/deadline/constraint/created/baseline dates,
+  parent task unique ID, work, cost, and fixed cost. Date values are still
+  filtered against the project date window before they are emitted.
 
 ## Build and test
 

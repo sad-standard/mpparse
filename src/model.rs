@@ -17,6 +17,8 @@ pub struct Task {
     /// 1-based hierarchy depth; reconstructs the work-breakdown tree.
     pub outline_level: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_unique_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start: Option<String>, // ISO-8601
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish: Option<String>, // ISO-8601
@@ -42,5 +44,15 @@ pub struct Task {
     pub constraint_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_finish: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_hours: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixed_cost: Option<f64>,
     pub percent_complete: u16,
 }

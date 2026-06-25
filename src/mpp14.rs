@@ -8,8 +8,8 @@
 //!        Fixed2Meta / Fixed2Data    (fixed block 1: Start, Finish)
 //!
 //! FIELD OFFSETS start from MPXJ's `FieldMap14` defaults. When a file provides
-//! the MPP14 root Props task field map, mapped fixed-data offsets are preferred
-//! for task Start/Finish and Scheduled Start/Finish.
+//! the MPP14 root Props task field map, mapped fixed/variable-data locations are
+//! preferred for the safe task fields exposed by the public model.
 
 use std::io::{Cursor, Read};
 
@@ -17,7 +17,7 @@ use chrono::{Duration, NaiveDateTime};
 
 use crate::fixed::{FixedData, FixedMeta};
 use crate::model::{Project, Task};
-use crate::util::{get_i32, get_timestamp, get_u16, get_u32, to_iso};
+use crate::util::{get_f64, get_i32, get_timestamp, get_u16, get_u32, to_iso};
 use crate::var::{Var2Data, VarMeta};
 
 // --- FieldMap14 default task offsets (block index, byte offset) / var keys ---
@@ -29,6 +29,7 @@ const FIX0_OUTLINE_LEVEL: usize = 40; //    block 0, MPXJ default
 const FIX0_OUTLINE_LEVEL_ALT: usize = 172; // byte fallback for newer/remapped MPP14 files
 const FIX0_EARLY_FINISH: usize = 8;
 const FIX0_LATE_START: usize = 12;
+const FIX0_PARENT_UNIQUE_ID: usize = 36;
 const FIX0_SCHEDULED_START: usize = 64;
 const FIX0_SCHEDULED_FINISH: usize = 68;
 const FIX0_ACTUAL_START: usize = 72;
@@ -38,6 +39,9 @@ const FIX0_CREATED: usize = 98;
 const FIX0_EARLY_START: usize = 106;
 const FIX0_LATE_FINISH: usize = 110;
 const FIX0_DEADLINE: usize = 122;
+const FIX0_WORK: usize = 126;
+const FIX0_COST: usize = 150;
+const FIX0_FIXED_COST: usize = 158;
 const FIX0_PERCENT_COMPLETE: usize = 90; // block 0
 const FIX1_START_ALT: usize = 46; // observed fallback start in newer/remapped MPP14 files
 const FIX1_START: usize = 50; //    block 1 (Fixed2Data)
@@ -48,8 +52,23 @@ const PROPS_KEY_TASK_FIELD_MAP: i32 = 131_092;
 const PROPS_KEY_TASK_FIELD_MAP2: i32 = 50_331_668;
 const TASK_FIELD_START: u16 = 1283;
 const TASK_FIELD_FINISH: u16 = 1284;
+const TASK_FIELD_WORK: u16 = 0;
+const TASK_FIELD_COST: u16 = 5;
+const TASK_FIELD_FIXED_COST: u16 = 8;
+const TASK_FIELD_CONSTRAINT_DATE: u16 = 18;
 const TASK_FIELD_SCHEDULED_START_LEGACY: u16 = 35;
 const TASK_FIELD_SCHEDULED_FINISH_LEGACY: u16 = 36;
+const TASK_FIELD_EARLY_START: u16 = 37;
+const TASK_FIELD_EARLY_FINISH: u16 = 38;
+const TASK_FIELD_LATE_START: u16 = 39;
+const TASK_FIELD_LATE_FINISH: u16 = 40;
+const TASK_FIELD_ACTUAL_START: u16 = 41;
+const TASK_FIELD_ACTUAL_FINISH: u16 = 42;
+const TASK_FIELD_BASELINE_START: u16 = 43;
+const TASK_FIELD_BASELINE_FINISH: u16 = 44;
+const TASK_FIELD_CREATED: u16 = 93;
+const TASK_FIELD_PARENT_UNIQUE_ID: u16 = 160;
+const TASK_FIELD_DEADLINE: u16 = 437;
 const TASK_FIELD_SCHEDULED_START: u16 = 1338;
 const TASK_FIELD_SCHEDULED_FINISH: u16 = 1339;
 
@@ -94,20 +113,46 @@ struct FieldItem {
 
 #[derive(Default, Debug)]
 struct TaskFieldMap {
-    start: Option<FieldItem>,
-    finish: Option<FieldItem>,
-    scheduled_start: Option<FieldItem>,
-    scheduled_finish: Option<FieldItem>,
+    entries: std::collections::BTreeMap<u16, FieldItem>,
 }
 
 impl TaskFieldMap {
     fn get(&self, task_field: u16) -> Option<FieldItem> {
-        match task_field {
-            TASK_FIELD_START => self.start,
-            TASK_FIELD_FINISH => self.finish,
-            TASK_FIELD_SCHEDULED_START | TASK_FIELD_SCHEDULED_START_LEGACY => self.scheduled_start,
-            TASK_FIELD_SCHEDULED_FINISH | TASK_FIELD_SCHEDULED_FINISH_LEGACY => self.scheduled_finish,
+        self.entries.get(&task_field).copied().or_else(|| match task_field {
+            TASK_FIELD_SCHEDULED_START => self.entries.get(&TASK_FIELD_SCHEDULED_START_LEGACY).copied(),
+            TASK_FIELD_SCHEDULED_START_LEGACY => self.entries.get(&TASK_FIELD_SCHEDULED_START).copied(),
+            TASK_FIELD_SCHEDULED_FINISH => self.entries.get(&TASK_FIELD_SCHEDULED_FINISH_LEGACY).copied(),
+            TASK_FIELD_SCHEDULED_FINISH_LEGACY => self.entries.get(&TASK_FIELD_SCHEDULED_FINISH).copied(),
             _ => None,
+        })
+    }
+
+    fn insert_if_known(&mut self, task_field: u16, item: FieldItem) {
+        match task_field {
+            TASK_FIELD_WORK
+            | TASK_FIELD_COST
+            | TASK_FIELD_FIXED_COST
+            | TASK_FIELD_CONSTRAINT_DATE
+            | TASK_FIELD_SCHEDULED_START_LEGACY
+            | TASK_FIELD_SCHEDULED_FINISH_LEGACY
+            | TASK_FIELD_EARLY_START
+            | TASK_FIELD_EARLY_FINISH
+            | TASK_FIELD_LATE_START
+            | TASK_FIELD_LATE_FINISH
+            | TASK_FIELD_ACTUAL_START
+            | TASK_FIELD_ACTUAL_FINISH
+            | TASK_FIELD_BASELINE_START
+            | TASK_FIELD_BASELINE_FINISH
+            | TASK_FIELD_CREATED
+            | TASK_FIELD_PARENT_UNIQUE_ID
+            | TASK_FIELD_DEADLINE
+            | TASK_FIELD_START
+            | TASK_FIELD_FINISH
+            | TASK_FIELD_SCHEDULED_START
+            | TASK_FIELD_SCHEDULED_FINISH => {
+                self.entries.insert(task_field, item);
+            }
+            _ => {}
         }
     }
 }
@@ -186,13 +231,7 @@ fn parse_task_field_map(props14: Option<&[u8]>) -> TaskFieldMap {
             offset: data_block_offset,
             var_key: i32::from(task_field),
         };
-        match task_field {
-            TASK_FIELD_START => result.start = Some(item),
-            TASK_FIELD_FINISH => result.finish = Some(item),
-            TASK_FIELD_SCHEDULED_START | TASK_FIELD_SCHEDULED_START_LEGACY => result.scheduled_start = Some(item),
-            TASK_FIELD_SCHEDULED_FINISH | TASK_FIELD_SCHEDULED_FINISH_LEGACY => result.scheduled_finish = Some(item),
-            _ => {}
-        }
+        result.insert_if_known(task_field, item);
         index += 28;
     }
     result
@@ -320,15 +359,55 @@ fn timestamp_from_field(
     item: Option<FieldItem>,
     d0: Option<&[u8]>,
     d2: Option<&[u8]>,
+    var_meta: &VarMeta,
+    var_data: &Var2Data,
+    unique_id: i32,
     window: Option<(NaiveDateTime, NaiveDateTime)>,
 ) -> Option<String> {
+    let item = item?;
+    match item.location {
+        FieldLocation::FixedData => match item.block {
+            0 => timestamp_at(d0, item.offset, window),
+            1 => timestamp_at(d2, item.offset, window),
+            _ => None,
+        },
+        FieldLocation::VarData => timestamp_at(var_data.get_bytes(var_meta, unique_id, item.var_key), 0, window),
+        _ => None,
+    }
+}
+
+fn i32_from_field(item: Option<FieldItem>, d0: Option<&[u8]>, d2: Option<&[u8]>) -> Option<i32> {
     let item = item?;
     if item.location != FieldLocation::FixedData {
         return None;
     }
     match item.block {
-        0 => timestamp_at(d0, item.offset, window),
-        1 => timestamp_at(d2, item.offset, window),
+        0 => d0.and_then(|d| get_i32(d, item.offset)),
+        1 => d2.and_then(|d| get_i32(d, item.offset)),
+        _ => None,
+    }
+}
+
+fn work_hours_at(data: Option<&[u8]>, offset: usize) -> Option<f64> {
+    let value = data.and_then(|d| get_f64(d, offset))?;
+    let value = if value.abs() < 1000.0 { 0.0 } else { value };
+    Some(value / 60_000.0)
+}
+
+fn cost_at(data: Option<&[u8]>, offset: usize) -> Option<f64> {
+    let value = data.and_then(|d| get_f64(d, offset))?;
+    let value = if value.abs() < 0.1 { 0.0 } else { value };
+    Some(value / 100.0)
+}
+
+fn f64_from_field(item: Option<FieldItem>, d0: Option<&[u8]>, d2: Option<&[u8]>, decoder: fn(Option<&[u8]>, usize) -> Option<f64>) -> Option<f64> {
+    let item = item?;
+    if item.location != FieldLocation::FixedData {
+        return None;
+    }
+    match item.block {
+        0 => decoder(d0, item.offset),
+        1 => decoder(d2, item.offset),
         _ => None,
     }
 }
@@ -399,6 +478,9 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
             field_map.get(TASK_FIELD_SCHEDULED_START),
             Some(d0),
             d2,
+            &var_meta,
+            &var_data,
+            unique_id,
             date_window,
         )
         .or_else(|| timestamp_at(Some(d0), FIX0_SCHEDULED_START, date_window));
@@ -406,16 +488,35 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
             field_map.get(TASK_FIELD_SCHEDULED_FINISH),
             Some(d0),
             d2,
+            &var_meta,
+            &var_data,
+            unique_id,
             date_window,
         )
         .or_else(|| timestamp_at(Some(d0), FIX0_SCHEDULED_FINISH, date_window));
-        let start = timestamp_from_field(field_map.get(TASK_FIELD_START), Some(d0), d2, date_window)
-            .or_else(|| timestamp_at(d2, FIX1_START, date_window))
-            .or_else(|| timestamp_at(d2, FIX1_START_ALT, date_window))
-            .or_else(|| scheduled_start.clone());
-        let finish = timestamp_from_field(field_map.get(TASK_FIELD_FINISH), Some(d0), d2, date_window)
-            .or_else(|| timestamp_at(d2, FIX1_FINISH, date_window))
-            .or_else(|| scheduled_finish.clone());
+        let start = timestamp_from_field(
+            field_map.get(TASK_FIELD_START),
+            Some(d0),
+            d2,
+            &var_meta,
+            &var_data,
+            unique_id,
+            date_window,
+        )
+        .or_else(|| timestamp_at(d2, FIX1_START, date_window))
+        .or_else(|| timestamp_at(d2, FIX1_START_ALT, date_window))
+        .or_else(|| scheduled_start.clone());
+        let finish = timestamp_from_field(
+            field_map.get(TASK_FIELD_FINISH),
+            Some(d0),
+            d2,
+            &var_meta,
+            &var_data,
+            unique_id,
+            date_window,
+        )
+        .or_else(|| timestamp_at(d2, FIX1_FINISH, date_window))
+        .or_else(|| scheduled_finish.clone());
 
         let task = Task {
             unique_id,
@@ -424,20 +525,40 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
                 .get_unicode_string(&var_meta, unique_id, VAR_NAME_KEY)
                 .unwrap_or_default(),
             outline_level: outline_level(d0),
+            parent_unique_id: i32_from_field(field_map.get(TASK_FIELD_PARENT_UNIQUE_ID), Some(d0), d2)
+                .or_else(|| get_i32(d0, FIX0_PARENT_UNIQUE_ID))
+                .filter(|&value| value > 0),
             percent_complete: get_u16(d0, FIX0_PERCENT_COMPLETE).unwrap_or(0),
             start,
             finish,
             scheduled_start,
             scheduled_finish,
-            actual_start: timestamp_at(Some(d0), FIX0_ACTUAL_START, date_window),
-            actual_finish: timestamp_at(Some(d0), FIX0_ACTUAL_FINISH, date_window),
-            early_start: timestamp_at(Some(d0), FIX0_EARLY_START, date_window),
-            early_finish: timestamp_at(Some(d0), FIX0_EARLY_FINISH, date_window),
-            late_start: timestamp_at(Some(d0), FIX0_LATE_START, date_window),
-            late_finish: timestamp_at(Some(d0), FIX0_LATE_FINISH, date_window),
-            deadline: timestamp_at(Some(d0), FIX0_DEADLINE, date_window),
-            constraint_date: timestamp_at(Some(d0), FIX0_CONSTRAINT_DATE, date_window),
-            created: timestamp_at(Some(d0), FIX0_CREATED, date_window),
+            actual_start: timestamp_from_field(field_map.get(TASK_FIELD_ACTUAL_START), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_ACTUAL_START, date_window)),
+            actual_finish: timestamp_from_field(field_map.get(TASK_FIELD_ACTUAL_FINISH), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_ACTUAL_FINISH, date_window)),
+            early_start: timestamp_from_field(field_map.get(TASK_FIELD_EARLY_START), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_EARLY_START, date_window)),
+            early_finish: timestamp_from_field(field_map.get(TASK_FIELD_EARLY_FINISH), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_EARLY_FINISH, date_window)),
+            late_start: timestamp_from_field(field_map.get(TASK_FIELD_LATE_START), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_LATE_START, date_window)),
+            late_finish: timestamp_from_field(field_map.get(TASK_FIELD_LATE_FINISH), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_LATE_FINISH, date_window)),
+            deadline: timestamp_from_field(field_map.get(TASK_FIELD_DEADLINE), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_DEADLINE, date_window)),
+            constraint_date: timestamp_from_field(field_map.get(TASK_FIELD_CONSTRAINT_DATE), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_CONSTRAINT_DATE, date_window)),
+            created: timestamp_from_field(field_map.get(TASK_FIELD_CREATED), Some(d0), d2, &var_meta, &var_data, unique_id, date_window)
+                .or_else(|| timestamp_at(Some(d0), FIX0_CREATED, date_window)),
+            baseline_start: timestamp_from_field(field_map.get(TASK_FIELD_BASELINE_START), Some(d0), d2, &var_meta, &var_data, unique_id, date_window),
+            baseline_finish: timestamp_from_field(field_map.get(TASK_FIELD_BASELINE_FINISH), Some(d0), d2, &var_meta, &var_data, unique_id, date_window),
+            work_hours: f64_from_field(field_map.get(TASK_FIELD_WORK), Some(d0), d2, work_hours_at)
+                .or_else(|| work_hours_at(Some(d0), FIX0_WORK)),
+            cost: f64_from_field(field_map.get(TASK_FIELD_COST), Some(d0), d2, cost_at)
+                .or_else(|| cost_at(Some(d0), FIX0_COST)),
+            fixed_cost: f64_from_field(field_map.get(TASK_FIELD_FIXED_COST), Some(d0), d2, cost_at)
+                .or_else(|| cost_at(Some(d0), FIX0_FIXED_COST)),
         };
         tasks.push(task);
     }
@@ -449,6 +570,7 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
 
     fn field_map_entry(offset: u16, task_field: u16) -> [u8; 28] {
         let mut entry = [0u8; 28];
@@ -481,10 +603,10 @@ mod tests {
 
         let parsed = parse_task_field_map(Some(&props14_entry(PROPS_KEY_TASK_FIELD_MAP, &map)));
 
-        assert_eq!(parsed.start.unwrap().offset, 50);
-        assert_eq!(parsed.finish.unwrap().offset, 54);
-        assert_eq!(parsed.scheduled_start.unwrap().offset, 48);
-        assert_eq!(parsed.scheduled_finish.unwrap().offset, 52);
+        assert_eq!(parsed.get(TASK_FIELD_START).unwrap().offset, 50);
+        assert_eq!(parsed.get(TASK_FIELD_FINISH).unwrap().offset, 54);
+        assert_eq!(parsed.get(TASK_FIELD_SCHEDULED_START).unwrap().offset, 48);
+        assert_eq!(parsed.get(TASK_FIELD_SCHEDULED_FINISH).unwrap().offset, 52);
     }
 
     #[test]
@@ -496,8 +618,74 @@ mod tests {
 
         let parsed = parse_task_field_map(Some(&props14_entry(PROPS_KEY_TASK_FIELD_MAP2, &map)));
 
-        assert_eq!(parsed.scheduled_finish.unwrap().block, 0);
-        assert_eq!(parsed.start.unwrap().block, 1);
-        assert_eq!(parsed.finish.unwrap().block, 1);
+        assert_eq!(parsed.get(TASK_FIELD_SCHEDULED_FINISH).unwrap().block, 0);
+        assert_eq!(parsed.get(TASK_FIELD_START).unwrap().block, 1);
+        assert_eq!(parsed.get(TASK_FIELD_FINISH).unwrap().block, 1);
+    }
+
+    #[test]
+    fn props14_extracts_additional_safe_fields() {
+        let mut map = Vec::new();
+        map.extend_from_slice(&field_map_entry(72, TASK_FIELD_ACTUAL_START));
+        map.extend_from_slice(&field_map_entry(76, TASK_FIELD_ACTUAL_FINISH));
+        map.extend_from_slice(&field_map_entry(36, TASK_FIELD_PARENT_UNIQUE_ID));
+        map.extend_from_slice(&field_map_entry(126, TASK_FIELD_WORK));
+        map.extend_from_slice(&field_map_entry(150, TASK_FIELD_COST));
+
+        let parsed = parse_task_field_map(Some(&props14_entry(PROPS_KEY_TASK_FIELD_MAP, &map)));
+
+        assert_eq!(parsed.get(TASK_FIELD_ACTUAL_START).unwrap().offset, 72);
+        assert_eq!(parsed.get(TASK_FIELD_ACTUAL_FINISH).unwrap().offset, 76);
+        assert_eq!(parsed.get(TASK_FIELD_PARENT_UNIQUE_ID).unwrap().offset, 36);
+        assert_eq!(parsed.get(TASK_FIELD_WORK).unwrap().offset, 126);
+        assert_eq!(parsed.get(TASK_FIELD_COST).unwrap().offset, 150);
+    }
+
+    #[test]
+    fn var_data_dates_are_window_filtered() {
+        let mut meta = Vec::new();
+        meta.extend_from_slice(&0xFADF_ADBAu32.to_le_bytes());
+        meta.extend_from_slice(&0u32.to_le_bytes());
+        meta.extend_from_slice(&1u32.to_le_bytes());
+        meta.extend_from_slice(&0u32.to_le_bytes());
+        meta.extend_from_slice(&0u32.to_le_bytes());
+        meta.extend_from_slice(&0u32.to_le_bytes());
+        meta.extend_from_slice(&7u32.to_le_bytes());
+        meta.extend_from_slice(&0u32.to_le_bytes());
+        meta.extend_from_slice(&TASK_FIELD_BASELINE_START.to_le_bytes());
+        meta.extend_from_slice(&0u16.to_le_bytes());
+        let var_meta = VarMeta::parse(&meta).unwrap();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&480u16.to_le_bytes());
+        payload.extend_from_slice(&366u16.to_le_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        data.extend_from_slice(&payload);
+        let var_data = Var2Data::parse(&var_meta, &data);
+
+        let item = FieldItem {
+            location: FieldLocation::VarData,
+            block: 0,
+            offset: 65535,
+            var_key: i32::from(TASK_FIELD_BASELINE_START),
+        };
+
+        assert_eq!(
+            timestamp_from_field(
+                Some(item),
+                None,
+                None,
+                &var_meta,
+                &var_data,
+                7,
+                Some((
+                    NaiveDate::from_ymd_opt(1984, 12, 30).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+                    NaiveDate::from_ymd_opt(1985, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+                )),
+            )
+            .as_deref(),
+            Some("1984-12-31T00:48:00")
+        );
     }
 }
