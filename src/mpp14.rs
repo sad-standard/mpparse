@@ -7,9 +7,9 @@
 //!        FixedMeta / FixedData      (fixed block 0: UID, ID, OutlineLevel, %)
 //!        Fixed2Meta / Fixed2Data    (fixed block 1: Start, Finish)
 //!
-//! FIELD OFFSETS are transcribed from MPXJ's `FieldMap14` defaults. Real files
-//! can remap these via an in-file field map (read by MPXJ's
-//! `createTaskFieldMap`); this MVP uses the defaults only. See README.
+//! FIELD OFFSETS start from MPXJ's `FieldMap14` defaults. When a file provides
+//! the MPP14 root Props task field map, mapped fixed-data offsets are preferred
+//! for task Start/Finish and Scheduled Start/Finish.
 
 use std::io::{Cursor, Read};
 
@@ -17,7 +17,7 @@ use chrono::{Duration, NaiveDateTime};
 
 use crate::fixed::{FixedData, FixedMeta};
 use crate::model::{Project, Task};
-use crate::util::{get_i32, get_timestamp, get_u16, to_iso};
+use crate::util::{get_i32, get_timestamp, get_u16, get_u32, to_iso};
 use crate::var::{Var2Data, VarMeta};
 
 // --- FieldMap14 default task offsets (block index, byte offset) / var keys ---
@@ -44,6 +44,15 @@ const FIX1_START: usize = 50; //    block 1 (Fixed2Data)
 const FIX1_FINISH: usize = 54; //   block 1 (Fixed2Data)
 const VAR_NAME_KEY: i32 = 14; //    Var2Data key
 
+const PROPS_KEY_TASK_FIELD_MAP: i32 = 131_092;
+const PROPS_KEY_TASK_FIELD_MAP2: i32 = 50_331_668;
+const TASK_FIELD_START: u16 = 1283;
+const TASK_FIELD_FINISH: u16 = 1284;
+const TASK_FIELD_SCHEDULED_START_LEGACY: u16 = 35;
+const TASK_FIELD_SCHEDULED_FINISH_LEGACY: u16 = 36;
+const TASK_FIELD_SCHEDULED_START: u16 = 1338;
+const TASK_FIELD_SCHEDULED_FINISH: u16 = 1339;
+
 const TASK_FIXEDMETA_ITEM_SIZE: usize = 47;
 const FIXED2META_CANDIDATES: [usize; 5] = [92, 93, 94, 95, 96];
 const NULL_TASK_BLOCK_SIZE: usize = 16;
@@ -61,6 +70,132 @@ fn read_stream<F: Read + std::io::Seek>(
     s.read_to_end(&mut buf)
         .map_err(|e| format!("read {path}: {e}"))?;
     Ok(buf)
+}
+
+fn read_stream_optional<F: Read + std::io::Seek>(cf: &mut cfb::CompoundFile<F>, path: &str) -> Option<Vec<u8>> {
+    read_stream(cf, path).ok()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FieldLocation {
+    FixedData,
+    VarData,
+    MetaData,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FieldItem {
+    location: FieldLocation,
+    block: usize,
+    offset: usize,
+    var_key: i32,
+}
+
+#[derive(Default, Debug)]
+struct TaskFieldMap {
+    start: Option<FieldItem>,
+    finish: Option<FieldItem>,
+    scheduled_start: Option<FieldItem>,
+    scheduled_finish: Option<FieldItem>,
+}
+
+impl TaskFieldMap {
+    fn get(&self, task_field: u16) -> Option<FieldItem> {
+        match task_field {
+            TASK_FIELD_START => self.start,
+            TASK_FIELD_FINISH => self.finish,
+            TASK_FIELD_SCHEDULED_START | TASK_FIELD_SCHEDULED_START_LEGACY => self.scheduled_start,
+            TASK_FIELD_SCHEDULED_FINISH | TASK_FIELD_SCHEDULED_FINISH_LEGACY => self.scheduled_finish,
+            _ => None,
+        }
+    }
+}
+
+fn parse_props14(data: &[u8]) -> std::collections::BTreeMap<i32, Vec<u8>> {
+    let mut result = std::collections::BTreeMap::new();
+    let Some(header_count) = get_u16(data, 12).map(usize::from) else {
+        return result;
+    };
+    let mut index = 16usize;
+    for _ in 0..header_count {
+        if index + 12 > data.len() {
+            break;
+        }
+        let Some(size) = get_u32(data, index).map(|v| v as usize) else {
+            break;
+        };
+        let Some(key) = get_i32(data, index + 4) else {
+            break;
+        };
+        index += 12;
+        if size < 1 || index + size > data.len() {
+            break;
+        }
+        result.insert(key, data[index..index + size].to_vec());
+        index += size;
+        if size % 2 != 0 {
+            index += 1;
+        }
+    }
+    result
+}
+
+fn parse_task_field_map(props14: Option<&[u8]>) -> TaskFieldMap {
+    let Some(props14) = props14 else {
+        return TaskFieldMap::default();
+    };
+    let props = parse_props14(props14);
+    let Some(data) = props
+        .get(&PROPS_KEY_TASK_FIELD_MAP)
+        .or_else(|| props.get(&PROPS_KEY_TASK_FIELD_MAP2))
+    else {
+        return TaskFieldMap::default();
+    };
+
+    let mut result = TaskFieldMap::default();
+    let mut index = 0usize;
+    let mut last_data_block_offset = 0usize;
+    let mut data_block_index = 0usize;
+    while index + 28 <= data.len() {
+        let Some(data_block_offset) = get_u16(data, index + 4).map(usize::from) else {
+            break;
+        };
+        let Some(type_value) = get_u32(data, index + 12) else {
+            break;
+        };
+        let Some(category) = get_u16(data, index + 20) else {
+            break;
+        };
+        let task_field = (type_value & 0xFFFF) as u16;
+        let location = match category {
+            0x0B | 0x64 => FieldLocation::MetaData,
+            _ if data_block_offset != 65_535 => {
+                if data_block_offset < last_data_block_offset {
+                    data_block_index += 1;
+                }
+                last_data_block_offset = data_block_offset;
+                FieldLocation::FixedData
+            }
+            _ if task_field != 0 => FieldLocation::VarData,
+            _ => FieldLocation::Unknown,
+        };
+        let item = FieldItem {
+            location,
+            block: data_block_index,
+            offset: data_block_offset,
+            var_key: i32::from(task_field),
+        };
+        match task_field {
+            TASK_FIELD_START => result.start = Some(item),
+            TASK_FIELD_FINISH => result.finish = Some(item),
+            TASK_FIELD_SCHEDULED_START | TASK_FIELD_SCHEDULED_START_LEGACY => result.scheduled_start = Some(item),
+            TASK_FIELD_SCHEDULED_FINISH | TASK_FIELD_SCHEDULED_FINISH_LEGACY => result.scheduled_finish = Some(item),
+            _ => {}
+        }
+        index += 28;
+    }
+    result
 }
 
 /// Detect the MPP format. We rely on the numbered project storage, which is the
@@ -120,19 +255,50 @@ fn outline_level(d0: &[u8]) -> u16 {
         .unwrap_or(0)
 }
 
-fn project_date_window(fixed2: Option<&FixedData>) -> Option<(NaiveDateTime, NaiveDateTime)> {
-    let fixed2 = fixed2?;
+fn project_date_window(
+    fixed_data: &FixedData,
+    fixed2: Option<&FixedData>,
+    field_map: &TaskFieldMap,
+) -> Option<(NaiveDateTime, NaiveDateTime)> {
     let mut min = None::<NaiveDateTime>;
     let mut max = None::<NaiveDateTime>;
+    let mut add = |value: NaiveDateTime| {
+        min = Some(min.map_or(value, |current| current.min(value)));
+        max = Some(max.map_or(value, |current| current.max(value)));
+    };
 
-    for index in 0..fixed2.item_count() {
-        let Some(data) = fixed2.item(index) else {
-            continue;
-        };
-        for offset in [FIX1_START_ALT, FIX1_START, FIX1_FINISH] {
-            if let Some(value) = get_timestamp(data, offset) {
-                min = Some(min.map_or(value, |current| current.min(value)));
-                max = Some(max.map_or(value, |current| current.max(value)));
+    let mut block0_offsets = vec![FIX0_SCHEDULED_START, FIX0_SCHEDULED_FINISH];
+    let mut block1_offsets = vec![FIX1_START_ALT, FIX1_START, FIX1_FINISH];
+    for item in [
+        field_map.get(TASK_FIELD_START),
+        field_map.get(TASK_FIELD_FINISH),
+        field_map.get(TASK_FIELD_SCHEDULED_START),
+        field_map.get(TASK_FIELD_SCHEDULED_FINISH),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|item| item.location == FieldLocation::FixedData)
+    {
+        match item.block {
+            0 => block0_offsets.push(item.offset),
+            1 => block1_offsets.push(item.offset),
+            _ => {}
+        }
+    }
+
+    for index in 0..fixed_data.item_count() {
+        if let Some(data) = fixed_data.item(index) {
+            for &offset in &block0_offsets {
+                if let Some(value) = get_timestamp(data, offset) {
+                    add(value);
+                }
+            }
+        }
+        if let Some(data) = fixed2.and_then(|f| f.item(index)) {
+            for &offset in &block1_offsets {
+                if let Some(value) = get_timestamp(data, offset) {
+                    add(value);
+                }
             }
         }
     }
@@ -148,6 +314,23 @@ fn timestamp_at(data: Option<&[u8]>, offset: usize, window: Option<(NaiveDateTim
         }
     }
     Some(to_iso(value))
+}
+
+fn timestamp_from_field(
+    item: Option<FieldItem>,
+    d0: Option<&[u8]>,
+    d2: Option<&[u8]>,
+    window: Option<(NaiveDateTime, NaiveDateTime)>,
+) -> Option<String> {
+    let item = item?;
+    if item.location != FieldLocation::FixedData {
+        return None;
+    }
+    match item.block {
+        0 => timestamp_at(d0, item.offset, window),
+        1 => timestamp_at(d2, item.offset, window),
+        _ => None,
+    }
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Project, String> {
@@ -172,6 +355,10 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
     )?;
     let fixed_data = FixedData::parse(&fixed_meta, &read_stream(&mut cf, &format!("{base}/FixedData"))?);
 
+    let project_props = read_stream_optional(&mut cf, &format!("/{PROJECT_DIR_14}/Props"))
+        .or_else(|| read_stream_optional(&mut cf, "/Props14"));
+    let field_map = parse_task_field_map(project_props.as_deref());
+
     // Fixed2 is optional on some files; tolerate its absence (Start/Finish None).
     let fixed2 = (|| -> Result<FixedData, String> {
         let fm2_bytes = read_stream(&mut cf, &format!("{base}/Fixed2Meta"))?;
@@ -186,7 +373,7 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
     .ok();
 
     let (unique_id_offset, id_offset) = choose_id_offsets(&fixed_data, &var_meta, &var_data);
-    let date_window = project_date_window(fixed2.as_ref());
+    let date_window = project_date_window(&fixed_data, fixed2.as_ref(), &field_map);
 
     let mut tasks = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -208,12 +395,27 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
 
         let d2 = fixed2.as_ref().and_then(|f| f.item(index));
 
-        let scheduled_start = timestamp_at(Some(d0), FIX0_SCHEDULED_START, date_window);
-        let scheduled_finish = timestamp_at(Some(d0), FIX0_SCHEDULED_FINISH, date_window);
-        let start = timestamp_at(d2, FIX1_START, date_window)
+        let scheduled_start = timestamp_from_field(
+            field_map.get(TASK_FIELD_SCHEDULED_START),
+            Some(d0),
+            d2,
+            date_window,
+        )
+        .or_else(|| timestamp_at(Some(d0), FIX0_SCHEDULED_START, date_window));
+        let scheduled_finish = timestamp_from_field(
+            field_map.get(TASK_FIELD_SCHEDULED_FINISH),
+            Some(d0),
+            d2,
+            date_window,
+        )
+        .or_else(|| timestamp_at(Some(d0), FIX0_SCHEDULED_FINISH, date_window));
+        let start = timestamp_from_field(field_map.get(TASK_FIELD_START), Some(d0), d2, date_window)
+            .or_else(|| timestamp_at(d2, FIX1_START, date_window))
             .or_else(|| timestamp_at(d2, FIX1_START_ALT, date_window))
             .or_else(|| scheduled_start.clone());
-        let finish = timestamp_at(d2, FIX1_FINISH, date_window).or_else(|| scheduled_finish.clone());
+        let finish = timestamp_from_field(field_map.get(TASK_FIELD_FINISH), Some(d0), d2, date_window)
+            .or_else(|| timestamp_at(d2, FIX1_FINISH, date_window))
+            .or_else(|| scheduled_finish.clone());
 
         let task = Task {
             unique_id,
@@ -242,4 +444,60 @@ pub fn parse(bytes: &[u8]) -> Result<Project, String> {
 
     tasks.sort_by_key(|t| t.id);
     Ok(Project { format, tasks })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field_map_entry(offset: u16, task_field: u16) -> [u8; 28] {
+        let mut entry = [0u8; 28];
+        entry.as_mut_slice()[4..6].copy_from_slice(&offset.to_le_bytes());
+        entry.as_mut_slice()[12..16].copy_from_slice(&(u32::from(task_field)).to_le_bytes());
+        entry.as_mut_slice()[20..22].copy_from_slice(&0x13u16.to_le_bytes());
+        entry
+    }
+
+    fn props14_entry(key: i32, value: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; 16];
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        data.extend_from_slice(&key.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(value);
+        if value.len() % 2 != 0 {
+            data.push(0);
+        }
+        data
+    }
+
+    #[test]
+    fn props14_extracts_task_field_map_offsets() {
+        let mut map = Vec::new();
+        map.extend_from_slice(&field_map_entry(50, TASK_FIELD_START));
+        map.extend_from_slice(&field_map_entry(54, TASK_FIELD_FINISH));
+        map.extend_from_slice(&field_map_entry(48, TASK_FIELD_SCHEDULED_START));
+        map.extend_from_slice(&field_map_entry(52, TASK_FIELD_SCHEDULED_FINISH));
+
+        let parsed = parse_task_field_map(Some(&props14_entry(PROPS_KEY_TASK_FIELD_MAP, &map)));
+
+        assert_eq!(parsed.start.unwrap().offset, 50);
+        assert_eq!(parsed.finish.unwrap().offset, 54);
+        assert_eq!(parsed.scheduled_start.unwrap().offset, 48);
+        assert_eq!(parsed.scheduled_finish.unwrap().offset, 52);
+    }
+
+    #[test]
+    fn field_map_increments_fixed_data_block_on_offset_wrap() {
+        let mut map = Vec::new();
+        map.extend_from_slice(&field_map_entry(90, TASK_FIELD_SCHEDULED_FINISH_LEGACY));
+        map.extend_from_slice(&field_map_entry(46, TASK_FIELD_START));
+        map.extend_from_slice(&field_map_entry(50, TASK_FIELD_FINISH));
+
+        let parsed = parse_task_field_map(Some(&props14_entry(PROPS_KEY_TASK_FIELD_MAP2, &map)));
+
+        assert_eq!(parsed.scheduled_finish.unwrap().block, 0);
+        assert_eq!(parsed.start.unwrap().block, 1);
+        assert_eq!(parsed.finish.unwrap().block, 1);
+    }
 }

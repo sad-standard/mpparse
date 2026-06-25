@@ -86,9 +86,9 @@ and variable block formats are ported from MPXJ.
   `FieldMap14` defaults. The reader also includes fallbacks for newer or
   remapped MPP14 files where task ID/unique ID, outline level, or task start
   moved.
-- In-file field-map remapping is not fully ported. If a real file's fields come
-  out shifted, porting MPXJ's `createTaskFieldMap` logic is the likely next
-  step.
+- MPP14 root `Props14` task field-map parsing is partially ported for fixed-data
+  Start/Finish and Scheduled Start/Finish remapping. Other field-map locations
+  (metadata and variable data) remain outside the current scope.
 
 ## Build and test
 
